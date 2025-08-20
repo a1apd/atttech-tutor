@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>AT&T Tech Tutor (Pilot)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+      h1 { font-size: 22px; }
+      .bubble { padding: 12px 14px; border-radius: 10px; margin: 10px 0; }
+      .you { background:#f2f2f2; }
+      .bot { background:#e8f4ff; }
+      textarea { width:100%; min-height: 90px; padding:10px; }
+      button { padding:10px 14px; }
+      .sources { font-size: 12px; color:#555; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>AT&T Tech Tutor (Pilot)</h1>
+
+    <div id="chat"></div>
+
+    <div>
+      <textarea id="question" placeholder="Ask a question about your course..."></textarea>
+      <button id="send">Send</button>
+    </div>
+
+    <p style="font-size:12px;color:#666">
+      Pilot note: This tutor prefers AT&amp;T Tech course files. If a file is missing, it will say so.
+    </p>
+
+    <script>
+      const chat = document.getElementById('chat');
+      const question = document.getElementById('question');
+      const send = document.getElementById('send');
+
+      function addBubble(text, who) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + who;
+        div.textContent = text;
+        chat.appendChild(div);
+        window.scrollTo(0, document.body.scrollHeight);
+      }
+
+      async function askTutor(q) {
+        addBubble(q, 'you');
+        addBubble('Thinking…', 'bot');
+
+        try {
+          const r = await fetch('/api/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ question: q })
+          });
+          const data = await r.json();
+          chat.lastChild.textContent = data.answer || 'Sorry, no answer.';
+          if (data.sources && data.sources.length) {
+            const s = document.createElement('div');
+            s.className = 'sources';
+            s.textContent = 'Sources: ' + data.sources.join(', ');
+            chat.appendChild(s);
+          }
+        } catch (e) {
+          chat.lastChild.textContent = 'Error talking to tutor. Try again.';
+        }
+      }
+
+      send.onclick = () => {
+        const q = question.value.trim();
+        if (!q) return;
+        question.value = '';
+        askTutor(q);
+      };
+    </script>
+  </body>
+</html>
