@@ -1,5 +1,5 @@
 // /api/chat.js — Vercel serverless function using the Assistants API + File Search
-// Requirements (set in Vercel → Project → Settings → Environment Variables):
+// Requirements (set in Vercel → Project → Settings → Environment Variables)
 //   OPENAI_API_KEY       = your OpenAI API key (never commit it)
 //   VECTOR_STORE_IDS     = vs_...  (comma-separated if multiple)  ← created earlier via curl
 
