@@ -10,6 +10,7 @@ const OPENAI_BASE = "https://api.openai.com/v1";
 const HEADERS = (key) => ({
   Authorization: `Bearer ${key}`,
   "Content-Type": "application/json",
+  "OpenAI-Beta": "assistants=v2", // required for Assistants API v2
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
