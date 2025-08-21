@@ -1,11 +1,11 @@
 // /api/chat.js — Vercel serverless function using Assistants API + File Search (vector stores)
 // Env vars (Vercel → Project → Settings → Environment Variables):
-//   OPENAI_API_KEY       = your OpenAI API key (required)
-//   VECTOR_STORE_IDS     = vs_... (comma-separated if multiple)  ← already created and loaded with files
+//   OPENAI_API_KEY    = sk-... (your real API key)
+//   VECTOR_STORE_IDS  = vs_... (comma-separated if multiple)
 
 const OPENAI_BASE = "https://api.openai.com/v1";
 
-// --- Helpers --------------------------------------------------------------
+/* --------------------- helpers --------------------- */
 
 const HEADERS = (key) => ({
   Authorization: `Bearer ${key}`,
@@ -23,13 +23,9 @@ async function readJsonOrText(resp) {
   }
 }
 
-/**
- * Poll a run until it completes (or fails/cancels/expirs).
- * Returns the final run object on success.
- */
 async function waitForRun(key, threadId, runId, timeoutMs = 60000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
     const r = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs/${runId}`, {
       headers: HEADERS(key),
     });
@@ -39,29 +35,19 @@ async function waitForRun(key, threadId, runId, timeoutMs = 60000) {
     }
     const run = await r.json();
 
-    // Completed
     if (run.status === "completed") return run;
-
-    // Hard stops
     if (["failed", "cancelled", "expired"].includes(run.status)) {
       const msg =
         run.last_error?.message ||
-        `Run ${run.status}${
-          run.last_error?.code ? ` (${run.last_error.code})` : ""
-        }`;
+        `Run ${run.status}${run.last_error?.code ? ` (${run.last_error.code})` : ""}`;
       throw new Error(msg);
     }
 
-    // Otherwise wait a bit and recheck
     await sleep(1200);
   }
   throw new Error("Run timed out waiting for completion");
 }
 
-/**
- * Pull the most recent assistant message text for a thread.
- * Concatenates all text segments if multiple parts exist.
- */
 async function getLatestAssistantText(key, threadId) {
   const r = await fetch(
     `${OPENAI_BASE}/threads/${threadId}/messages?order=desc&limit=5`,
@@ -72,8 +58,6 @@ async function getLatestAssistantText(key, threadId) {
     throw new Error(`List messages error ${r.status}: ${JSON.stringify(detail)}`);
   }
   const out = await r.json();
-
-  // Find first assistant message in the newest messages
   const msg = (out.data || []).find((m) => m.role === "assistant");
   if (!msg || !Array.isArray(msg.content)) return "";
 
@@ -86,11 +70,11 @@ async function getLatestAssistantText(key, threadId) {
   return text.trim();
 }
 
-// --- Main handler ---------------------------------------------------------
+/* --------------------- handler --------------------- */
 
 module.exports = async (req, res) => {
   try {
-    // Basic CORS / method guard
+    // CORS + method guard
     if (req.method === "OPTIONS") {
       res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -100,15 +84,20 @@ module.exports = async (req, res) => {
       return res.status(405).json({ error: "Use POST" });
     }
 
-    // Parse question
-    const { question } = req.body || {};
-    const q = (question || "").toString().trim();
-    if (!q) return res.status(400).json({ error: "No question provided" });
+    // Ensure we have JSON
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const rawQuestion = (body.question || "").toString().trim();
 
-    // Env vars
+    // ---- visibility in Vercel Logs ----
+    console.log("REQ question:", rawQuestion);
+    console.log("ENV OPENAI_API_KEY present?", !!process.env.OPENAI_API_KEY);
+    console.log("ENV VECTOR_STORE_IDS:", process.env.VECTOR_STORE_IDS);
+
+    if (!rawQuestion) return res.status(400).json({ error: "No question provided" });
+
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY in Vercel env" });
     }
 
     const VECTOR_STORE_IDS = (process.env.VECTOR_STORE_IDS || "")
@@ -120,11 +109,11 @@ module.exports = async (req, res) => {
       return res.status(500).json({
         error: "No vector store configured",
         detail:
-          "Set VECTOR_STORE_IDS (vs_...) in Vercel → Settings → Environment Variables and redeploy.",
+          "Set VECTOR_STORE_IDS to your vs_... id in Vercel → Settings → Environment Variables, then redeploy.",
       });
     }
 
-    // 1) Create an ephemeral assistant configured with file_search
+    // 1) Create ephemeral assistant (no tool_resources here)
     const assistantResp = await fetch(`${OPENAI_BASE}/assistants`, {
       method: "POST",
       headers: HEADERS(OPENAI_API_KEY),
@@ -133,81 +122,74 @@ module.exports = async (req, res) => {
         name: "AT&T Tech Tutor",
         temperature: 0.2,
         instructions:
-          "You are AT&T Tech Institute’s tutor. Use file_search to answer **only** from the Institute’s PDFs. " +
+          "You are AT&T Tech Institute’s tutor. Use file_search to answer strictly from the Institute’s PDFs. " +
           "Prefer direct quotes with short citations when possible. " +
-          "If the answer cannot be found in the uploaded materials, say: 'I can’t find that in the files. Please upload the document that contains it.'",
+          "If the answer is not in the files, say: 'I can’t find that in the files. Please upload the document that contains it.'",
         tools: [{ type: "file_search" }],
       }),
     });
     if (!assistantResp.ok) {
       const detail = await readJsonOrText(assistantResp);
-      return res.status(assistantResp.status).json({
-        error: "Create assistant error",
-        detail,
-      });
+      console.error("Create assistant error:", detail);
+      return res.status(assistantResp.status).json({ error: "Create assistant error", detail });
     }
     const assistant = await assistantResp.json();
+    console.log("Assistant created:", assistant.id);
 
-    // 2) Create a new thread and put the user message in it
+    // 2) Create a thread with the user question
     const threadResp = await fetch(`${OPENAI_BASE}/threads`, {
       method: "POST",
       headers: HEADERS(OPENAI_API_KEY),
       body: JSON.stringify({
-        messages: [{ role: "user", content: q }],
+        messages: [{ role: "user", content: rawQuestion }],
       }),
     });
     if (!threadResp.ok) {
       const detail = await readJsonOrText(threadResp);
-      return res.status(threadResp.status).json({
-        error: "Create thread error",
-        detail,
-      });
+      console.error("Create thread error:", detail);
+      return res.status(threadResp.status).json({ error: "Create thread error", detail });
     }
     const thread = await threadResp.json();
+    console.log("Thread created:", thread.id);
 
-    // 3) Start a run and ATTACH the vector stores HERE
-    //    (Attaching at run-time avoids the 'unknown parameter' errors.)
-    const runResp = await fetch(
-      `${OPENAI_BASE}/threads/${thread.id}/runs`,
-      {
-        method: "POST",
-        headers: HEADERS(OPENAI_API_KEY),
-        body: JSON.stringify({
-          assistant_id: assistant.id,
-          tools: [{ type: "file_search" }],
-          tool_resources: {
-            file_search: { vector_store_ids: VECTOR_STORE_IDS },
-          },
-        }),
-      }
-    );
+    // 3) Start a run and ATTACH vector store(s) HERE
+    const runResp = await fetch(`${OPENAI_BASE}/threads/${thread.id}/runs`, {
+      method: "POST",
+      headers: HEADERS(OPENAI_API_KEY),
+      body: JSON.stringify({
+        assistant_id: assistant.id,
+        tools: [{ type: "file_search" }],
+        tool_resources: {
+          file_search: { vector_store_ids: VECTOR_STORE_IDS },
+        },
+      }),
+    });
     if (!runResp.ok) {
       const detail = await readJsonOrText(runResp);
-      return res.status(runResp.status).json({
-        error: "Create run error",
-        detail,
-      });
+      console.error("Create run error:", detail);
+      return res.status(runResp.status).json({ error: "Create run error", detail });
     }
     const run = await runResp.json();
+    console.log("Run started:", run.id, "VS:", VECTOR_STORE_IDS);
 
     // 4) Wait for completion
     await waitForRun(OPENAI_API_KEY, thread.id, run.id);
+    console.log("Run completed");
 
-    // 5) Read the latest assistant message
+    // 5) Fetch latest assistant message
     const answer = await getLatestAssistantText(OPENAI_API_KEY, thread.id);
-
     if (!answer) {
-      // Return 200 but with a helpful hint; your UI treats empty answer as "Sorry, no answer."
+      console.warn("No assistant text returned");
       return res.status(200).json({
         answer: "",
         hint:
-          "No text returned. Ensure the vector store has a small test PDF, status=completed, and that your question matches the file’s wording.",
+          "No text returned. Ensure your vector store has a test PDF (status=completed) and the question matches the wording.",
       });
     }
 
     return res.status(200).json({ answer });
   } catch (err) {
-    // Surface concise server-side error
+    console.error("Server error:", err);
     return res.status(500).json({
       error: "Server error",
       detail: String(err?.message || err),
